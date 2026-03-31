@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Trash2, Printer, Search, Loader2, FileText } from "lucide-react";
+import { Plus, Trash2, Printer, Search, Loader2, FileText, RotateCcw, CheckCircle2 } from "lucide-react";
 import { formatDateTime } from "../utils/date";
 import { downloadInvoicePdf } from "../utils/invoicePdf";
 import { inventoryApi, medicinesApi, salesApi } from "../utils/api";
@@ -38,6 +38,7 @@ interface MedicineOption {
   genericName: string;
   category: string;
   price: number;
+  status: "active" | "inactive";
 }
 
 interface InventoryBatch {
@@ -54,9 +55,12 @@ interface RecentSale {
   invoiceId: string;
   date: string;
   total: number;
+  originalTotal: number;
   items: number;
   customerName: string;
   paymentMethod: string;
+  isReturned: boolean;
+  returnedAt: string | null;
 }
 
 export function Sales() {
@@ -71,6 +75,7 @@ export function Sales() {
   const [inventoryBatches, setInventoryBatches] = useState<InventoryBatch[]>([]);
   const [recentSales, setRecentSales] = useState<RecentSale[]>([]);
   const [invoiceLoadingId, setInvoiceLoadingId] = useState<string | null>(null);
+  const [returningSaleId, setReturningSaleId] = useState<string | null>(null);
   const [showAllSales, setShowAllSales] = useState(false);
 
   useEffect(() => {
@@ -87,13 +92,16 @@ export function Sales() {
       ]);
 
       setMedicines(
-        (medicinesResponse.data || []).map((medicine: any) => ({
-          id: String(medicine.id),
-          name: String(medicine.name),
-          genericName: String(medicine.genericName ?? medicine.generic_name ?? medicine.name ?? ""),
-          category: String(medicine.category ?? ""),
-          price: Number(medicine.price || 0),
-        }))
+        (medicinesResponse.data || [])
+          .map((medicine: any) => ({
+            id: String(medicine.id),
+            name: String(medicine.name),
+            genericName: String(medicine.genericName ?? medicine.generic_name ?? medicine.name ?? ""),
+            category: String(medicine.category ?? ""),
+            price: Number(medicine.price || 0),
+            status: medicine.status === "inactive" ? "inactive" : "active",
+          }))
+          .filter((medicine: MedicineOption) => medicine.status === "active")
       );
 
       setInventoryBatches(
@@ -113,9 +121,12 @@ export function Sales() {
           invoiceId: String(sale.invoiceId ?? sale.invoiceid ?? `INV-${sale.id}`),
           date: String(sale.date ?? ""),
           total: Number(sale.total || 0),
+          originalTotal: Number(sale.originalTotal ?? sale.original_total ?? sale.total ?? 0),
           items: Number(sale.items || 0),
           customerName: String(sale.customerName ?? sale.customer_name ?? "Walk-in Customer"),
           paymentMethod: String(sale.paymentMethod ?? sale.paymentmethod ?? "unknown"),
+          isReturned: Boolean(sale.isReturned ?? sale.is_returned ?? false),
+          returnedAt: sale.returnedAt ?? sale.returned_at ?? null,
         }))
       );
     } catch (error) {
@@ -139,6 +150,7 @@ export function Sales() {
   const todaySummary = useMemo(() => {
     const today = new Date();
     const sameDaySales = recentSales.filter((sale) => {
+      if (sale.isReturned) return false;
       const saleDate = new Date(sale.date);
       return (
         saleDate.getDate() === today.getDate() &&
@@ -306,6 +318,46 @@ export function Sales() {
       alert(error?.message || "Failed to process sale.");
     } finally {
       setCheckoutLoading(false);
+    }
+  };
+
+  const handleReturnSale = async (sale: RecentSale) => {
+    if (sale.isReturned) {
+      return;
+    }
+
+    const shouldReturn = window.confirm(
+      `Return sale ${sale.invoiceId}? This will restore all medicines to their original batches and remove the sale amount from revenue totals.`
+    );
+    if (!shouldReturn) {
+      return;
+    }
+
+    try {
+      setReturningSaleId(sale.id);
+      const response = await salesApi.returnSale(sale.id);
+      const returnedAt = String(response.data?.returnedAt ?? response.data?.returned_at ?? new Date().toISOString());
+
+      setRecentSales((prev) =>
+        prev.map((currentSale) =>
+          currentSale.id === sale.id
+            ? {
+                ...currentSale,
+                total: 0,
+                isReturned: true,
+                returnedAt,
+              }
+            : currentSale
+        )
+      );
+
+      await loadSalesData(showAllSales);
+      window.dispatchEvent(new CustomEvent("pharmacy:data-updated", { detail: { source: "sales-return" } }));
+    } catch (error: any) {
+      console.error("Error returning sale:", error);
+      alert(error?.message || "Failed to return this sale.");
+    } finally {
+      setReturningSaleId(null);
     }
   };
 
@@ -598,40 +650,89 @@ export function Sales() {
               ) : (
                 <div className="space-y-3">
                   {recentSales.map((sale) => (
-                    <button
+                    <div
                       key={sale.id}
-                      type="button"
-                      className="w-full p-3 bg-gray-50 rounded-lg text-left hover:bg-gray-100 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                      onClick={() => void handleRecentSaleInvoice(sale)}
-                      disabled={invoiceLoadingId === sale.id}
-                      title="Click to download invoice"
+                      className="w-full p-3 bg-gray-50 rounded-lg text-left"
                     >
                       <div className="flex justify-between items-start">
                         <div>
-                          <p className="text-sm">{sale.invoiceId}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm">{sale.invoiceId}</p>
+                            {sale.isReturned ? (
+                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-700">
+                                Returned
+                              </span>
+                            ) : null}
+                          </div>
                           <p className="text-xs text-gray-500 mt-1">{formatDateTime(sale.date)}</p>
                           <p className="text-xs text-gray-500">{sale.customerName}</p>
                           <p className="text-xs text-gray-500">{sale.paymentMethod}</p>
+                          {sale.isReturned && sale.returnedAt ? (
+                            <p className="text-xs text-amber-700 mt-1">
+                              Returned on {formatDateTime(sale.returnedAt)}
+                            </p>
+                          ) : null}
                         </div>
                         <div className="text-right">
-                          <p className="text-sm">{"\u20B9"} {sale.total.toFixed(2)}</p>
+                          {sale.isReturned ? (
+                            <>
+                              <p className="text-sm text-gray-400 line-through">
+                                {"\u20B9"} {sale.originalTotal.toFixed(2)}
+                              </p>
+                              <p className="text-xs text-amber-700">Net sale: {"\u20B9"} 0.00</p>
+                            </>
+                          ) : (
+                            <p className="text-sm">{"\u20B9"} {sale.total.toFixed(2)}</p>
+                          )}
                           <p className="text-xs text-gray-500">{sale.items} items</p>
-                          <p className="text-xs text-blue-600 mt-1 inline-flex items-center gap-1">
-                            {invoiceLoadingId === sale.id ? (
-                              <>
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                Preparing invoice...
-                              </>
-                            ) : (
-                              <>
-                                <FileText className="w-3 h-3" />
-                                Download invoice
-                              </>
-                            )}
-                          </p>
                         </div>
                       </div>
-                    </button>
+                      <div className="mt-3 flex flex-wrap justify-end gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleRecentSaleInvoice(sale)}
+                          disabled={invoiceLoadingId === sale.id || returningSaleId === sale.id}
+                        >
+                          {invoiceLoadingId === sale.id ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Preparing invoice...
+                            </>
+                          ) : (
+                            <>
+                              <FileText className="w-3 h-3" />
+                              Download invoice
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={sale.isReturned ? "secondary" : "outline"}
+                          size="sm"
+                          onClick={() => void handleReturnSale(sale)}
+                          disabled={sale.isReturned || returningSaleId === sale.id || invoiceLoadingId === sale.id}
+                        >
+                          {returningSaleId === sale.id ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Returning...
+                            </>
+                          ) : sale.isReturned ? (
+                            <>
+                              <CheckCircle2 className="w-3 h-3" />
+                              Returned
+                            </>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-3 h-3" />
+                              Return
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    </div>
                   ))}
                 </div>
               )}

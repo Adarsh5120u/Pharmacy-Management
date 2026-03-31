@@ -1,4 +1,5 @@
 const pool = require('../../db');
+const { ensureMedicineStatusColumn, getMedicineStatusSql } = require('../medicines/medicineStatus');
 
 let purchaseQuantityColumnExists = null;
 
@@ -18,6 +19,7 @@ async function hasPurchaseQuantityColumn() {
 }
 
 async function listInventory() {
+  await ensureMedicineStatusColumn();
   const hasPurchaseQty = await hasPurchaseQuantityColumn();
   const purchaseQtySelect = hasPurchaseQty
     ? 'COALESCE(mb.purchase_quantity, mb.quantity_available)'
@@ -44,6 +46,7 @@ async function listInventory() {
       ) as "salesReferences"
     FROM MEDICINE_BATCH mb
     JOIN MEDICINE m ON mb.medicine_id = m.medicine_id
+    WHERE ${getMedicineStatusSql('m')} = 'active'
     ORDER BY m.name ASC
   `
   );
@@ -52,8 +55,19 @@ async function listInventory() {
 }
 
 async function addBatch({ medicineId, expiryDate, quantity, location, reorderLevel }) {
-  const medicineCheck = await pool.query('SELECT unit_price FROM MEDICINE WHERE medicine_id = $1', [medicineId]);
+  await ensureMedicineStatusColumn();
+  const medicineCheck = await pool.query(
+    `SELECT unit_price, ${getMedicineStatusSql()} as status
+     FROM MEDICINE
+     WHERE medicine_id = $1`,
+    [medicineId]
+  );
   if (medicineCheck.rows.length === 0) return null;
+  if (medicineCheck.rows[0].status !== 'active') {
+    const err = new Error('Inactive medicine cannot be added to inventory.');
+    err.statusCode = 400;
+    throw err;
+  }
 
   const unitPrice = Number(medicineCheck.rows[0].unit_price || 0);
   const normalizedLocation =

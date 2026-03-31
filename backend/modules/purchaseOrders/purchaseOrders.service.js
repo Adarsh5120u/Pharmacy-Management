@@ -2,6 +2,42 @@ const pool = require('../../db');
 
 const PURCHASE_ORDER_STATUSES = ['pending', 'approved', 'received', 'cancelled'];
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+let purchaseQuantityColumnReady = false;
+let purchaseQuantityColumnPromise = null;
+
+async function ensurePurchaseQuantityColumn(client = pool) {
+  if (purchaseQuantityColumnReady) {
+    return true;
+  }
+
+  if (!purchaseQuantityColumnPromise) {
+    purchaseQuantityColumnPromise = (async () => {
+      const checkResult = await client.query(
+        `SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'medicine_batch'
+           AND column_name = 'purchase_quantity'
+         LIMIT 1`
+      );
+
+      if (checkResult.rows.length === 0) {
+        await client.query('ALTER TABLE MEDICINE_BATCH ADD COLUMN IF NOT EXISTS purchase_quantity INT');
+      }
+
+      await client.query(
+        'UPDATE MEDICINE_BATCH SET purchase_quantity = quantity_available WHERE purchase_quantity IS NULL'
+      );
+
+      purchaseQuantityColumnReady = true;
+      return true;
+    })().finally(() => {
+      purchaseQuantityColumnPromise = null;
+    });
+  }
+
+  return purchaseQuantityColumnPromise;
+}
 
 async function listPurchaseOrders() {
   const result = await pool.query(`
@@ -24,6 +60,8 @@ async function listPurchaseOrders() {
 }
 
 async function getPurchaseOrderById(id) {
+  await ensurePurchaseQuantityColumn();
+
   const orderResult = await pool.query(
     `
     SELECT
@@ -32,9 +70,18 @@ async function getPurchaseOrderById(id) {
       po.order_date as "orderDate",
       s.supplier_id as "supplierId",
       s.supplier_name as "supplierName",
-      po.status
+      po.status,
+      rb."receivedAt"
     FROM PURCHASE_ORDER po
     JOIN SUPPLIER s ON po.supplier_id = s.supplier_id
+    LEFT JOIN LATERAL (
+      SELECT MAX(mb.created_at) as "receivedAt"
+      FROM PURCHASE_ORDER_ITEM poi
+      JOIN MEDICINE_BATCH mb
+        ON mb.medicine_id = poi.medicine_id
+       AND mb.batch_number LIKE ('PO-' || po.purchase_order_id::text || '-M-' || poi.medicine_id::text || '-%')
+      WHERE poi.purchase_order_id = po.purchase_order_id
+    ) rb ON true
     WHERE po.purchase_order_id = $1
     `,
     [id]
@@ -50,9 +97,25 @@ async function getPurchaseOrderById(id) {
       m.name as "medicineName",
       poi.quantity,
       poi.unit_price as "unitPrice",
-      (poi.quantity * poi.unit_price) as "lineTotal"
+      (poi.quantity * poi.unit_price) as "lineTotal",
+      rb."receivedQuantity",
+      rb."expiryDate",
+      rb."batchNumber",
+      rb."receivedAt"
     FROM PURCHASE_ORDER_ITEM poi
     JOIN MEDICINE m ON poi.medicine_id = m.medicine_id
+    LEFT JOIN LATERAL (
+      SELECT
+        mb.batch_number as "batchNumber",
+        mb.expiry_date as "expiryDate",
+        COALESCE(mb.purchase_quantity, NULLIF(mb.quantity_available, 0), poi.quantity) as "receivedQuantity",
+        mb.created_at as "receivedAt"
+      FROM MEDICINE_BATCH mb
+      WHERE mb.medicine_id = poi.medicine_id
+        AND mb.batch_number LIKE ('PO-' || poi.purchase_order_id::text || '-M-' || poi.medicine_id::text || '-%')
+      ORDER BY mb.created_at DESC, mb.batch_id DESC
+      LIMIT 1
+    ) rb ON true
     WHERE poi.purchase_order_id = $1
     ORDER BY poi.item_id ASC
     `,
@@ -109,6 +172,8 @@ async function createPurchaseOrder({ supplierId, items, orderDate, status }) {
 async function updatePurchaseOrderStatus(id, { status, receivedItems }) {
   const client = await pool.connect();
   try {
+    await ensurePurchaseQuantityColumn(client);
+
     const normalizedStatus = typeof status === 'string' ? status.toLowerCase() : '';
 
     if (!PURCHASE_ORDER_STATUSES.includes(normalizedStatus)) {
@@ -215,9 +280,9 @@ async function updatePurchaseOrderStatus(id, { status, receivedItems }) {
 
         await client.query(
           `INSERT INTO MEDICINE_BATCH
-            (medicine_id, batch_number, expiry_date, purchase_price, selling_price, quantity_available)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [item.medicine_id, generatedBatchNumber, expiryDate, purchasePrice, sellingPrice, quantityReceived]
+            (medicine_id, batch_number, expiry_date, purchase_price, selling_price, purchase_quantity, quantity_available)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [item.medicine_id, generatedBatchNumber, expiryDate, purchasePrice, sellingPrice, quantityReceived, quantityReceived]
         );
       }
 

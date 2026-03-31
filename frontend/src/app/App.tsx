@@ -26,6 +26,12 @@ type ReportNotification = {
   createdAt: string;
 };
 
+type GeneratedReportPayload = {
+  title: string;
+  fileName: string;
+  blob: Blob;
+};
+
 function App() {
   const [activeScreen, setActiveScreen] = useState("dashboard");
   const [initialized, setInitialized] = useState(false);
@@ -80,7 +86,7 @@ function App() {
     initializeSystem();
   }, []);
 
-  const handleSalesReportGenerated = (payload: { title: string; fileName: string; blob: Blob }) => {
+  const handleReportGenerated = (payload: GeneratedReportPayload) => {
     const url = URL.createObjectURL(payload.blob);
     const notification: ReportNotification = {
       id: crypto.randomUUID(),
@@ -111,7 +117,7 @@ function App() {
       case "inventory":
         return <Inventory />;
       case "purchases":
-        return <PurchaseOrders />;
+        return <PurchaseOrders onPurchaseOrderReportGenerated={handleReportGenerated} />;
       case "prescriptions":
         return <Prescriptions />;
       case "sales":
@@ -121,7 +127,7 @@ function App() {
           <Profile
             user={user}
             onBack={() => setActiveScreen("dashboard")}
-            onSalesReportGenerated={handleSalesReportGenerated}
+            onSalesReportGenerated={handleReportGenerated}
           />
         );
       default:

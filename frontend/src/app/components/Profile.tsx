@@ -48,7 +48,8 @@ export function Profile({ user, onBack, onSalesReportGenerated }: ProfileProps) 
       const filteredSales = sales.filter((sale: any) => {
         const saleDate = new Date(String(sale.date ?? sale.sale_date ?? ""));
         if (Number.isNaN(saleDate.getTime())) return false;
-        return saleDate >= from && saleDate <= to;
+        const isReturned = Boolean(sale.isReturned ?? sale.is_returned ?? false);
+        return saleDate >= from && saleDate <= to && !isReturned;
       });
 
       const entries: SalesReportEntry[] = filteredSales.map((sale: any) => ({

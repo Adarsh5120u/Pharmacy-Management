@@ -71,6 +71,7 @@ export function MedicineMaster() {
           ...m,
           id: String(m.id),
           price: Number(m.price || 0),
+          status: m.status === "inactive" ? "inactive" : "active",
         }))
       );
     } catch (error) {
@@ -120,10 +121,16 @@ export function MedicineMaster() {
 
     try {
       const newStatus = medicine.status === "active" ? "inactive" : "active";
-      await medicinesApi.update(id, { ...medicine, status: newStatus });
+      const response = await medicinesApi.update(id, { ...medicine, status: newStatus });
+      const updatedMedicine = response.data;
       setMedicines((prev) =>
         prev.map((med) =>
-          med.id === id ? { ...med, status: newStatus } : med
+          med.id === id
+            ? {
+                ...med,
+                status: updatedMedicine?.status === "inactive" ? "inactive" : "active",
+              }
+            : med
         )
       );
     } catch (error) {

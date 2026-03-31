@@ -1,6 +1,12 @@
 const pool = require('../../db');
+const {
+  ensureSaleReturnColumns,
+  getActiveSaleAmountSql,
+  getNonReturnedSaleCondition,
+} = require('../sales/saleReturnColumns');
 
 async function getDashboardStats() {
+  await ensureSaleReturnColumns();
   const medicines = await pool.query('SELECT COUNT(*) as count FROM MEDICINE');
   const lowStock = await pool.query(`
       SELECT COUNT(*) as count FROM MEDICINE_BATCH
@@ -17,8 +23,8 @@ async function getDashboardStats() {
     `);
   const todayResult = await pool.query(`
       SELECT 
-        COUNT(*) as count,
-        COALESCE(SUM(total_amount), 0) as total
+        COUNT(*) FILTER (WHERE ${getNonReturnedSaleCondition()}) as count,
+        COALESCE(SUM(${getActiveSaleAmountSql()}), 0) as total
       FROM PHARMACY_SALE
       WHERE DATE(sale_date) = CURRENT_DATE
     `);
@@ -43,6 +49,7 @@ async function getDashboardStats() {
 }
 
 async function getSalesAnalytics() {
+  await ensureSaleReturnColumns();
   const trendResult = await pool.query(`
       WITH months AS (
         SELECT generate_series(
@@ -57,6 +64,7 @@ async function getSalesAnalytics() {
       FROM months m
       LEFT JOIN PHARMACY_SALE s
         ON date_trunc('month', s.sale_date) = m.month_start
+       AND ${getNonReturnedSaleCondition('s')}
       GROUP BY m.month_start
       ORDER BY m.month_start ASC
     `);
@@ -66,7 +74,9 @@ async function getSalesAnalytics() {
         COALESCE(NULLIF(m.category, ''), 'Others') as name,
         COALESCE(SUM(si.quantity * si.price), 0) as value
       FROM PHARMACY_SALE_ITEM si
+      JOIN PHARMACY_SALE s ON si.sale_id = s.sale_id
       JOIN MEDICINE m ON si.medicine_id = m.medicine_id
+      WHERE ${getNonReturnedSaleCondition('s')}
       GROUP BY COALESCE(NULLIF(m.category, ''), 'Others')
       ORDER BY value DESC
       LIMIT 6

@@ -1,4 +1,5 @@
 const pool = require('../../db');
+const { ensureMedicineStatusColumn, normalizeMedicineStatus } = require('./medicineStatus');
 
 function mapMedicineRow(row) {
   return {
@@ -14,11 +15,12 @@ function mapMedicineRow(row) {
     genericName: row.generic_name || row.name,
     form: row.dosage_form,
     price: Number(row.unit_price || 0),
-    status: 'active',
+    status: normalizeMedicineStatus(row.status),
   };
 }
 
 async function listMedicines(search) {
+  await ensureMedicineStatusColumn();
   let query = 'SELECT * FROM MEDICINE ORDER BY name ASC';
   const params = [];
 
@@ -34,21 +36,35 @@ async function listMedicines(search) {
 }
 
 async function getMedicineById(id) {
+  await ensureMedicineStatusColumn();
   const result = await pool.query('SELECT * FROM MEDICINE WHERE medicine_id = $1', [id]);
   if (result.rows.length === 0) return null;
   return mapMedicineRow(result.rows[0]);
 }
 
 async function createMedicine(payload) {
-  const { name, genericName, category, manufacturer, dosageForm, strength, prescriptionRequired, medicineCode, price } = payload;
+  await ensureMedicineStatusColumn();
+  const {
+    name,
+    genericName,
+    category,
+    manufacturer,
+    dosageForm,
+    strength,
+    prescriptionRequired,
+    medicineCode,
+    price,
+    status,
+  } = payload;
   const parsedPrice = Number(price);
   const unitPrice = Number.isFinite(parsedPrice) ? parsedPrice : 0;
   const normalizedGenericName =
     typeof genericName === 'string' && genericName.trim().length > 0 ? genericName.trim() : name;
+  const normalizedStatus = normalizeMedicineStatus(status);
 
   const result = await pool.query(
-    `INSERT INTO MEDICINE (medicine_code, name, generic_name, category, manufacturer, dosage_form, strength, unit_price, prescription_required)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO MEDICINE (medicine_code, name, generic_name, category, manufacturer, dosage_form, strength, unit_price, prescription_required, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [
       medicineCode,
@@ -60,6 +76,7 @@ async function createMedicine(payload) {
       strength,
       unitPrice,
       prescriptionRequired !== false,
+      normalizedStatus,
     ]
   );
 
@@ -67,7 +84,18 @@ async function createMedicine(payload) {
 }
 
 async function updateMedicine(id, payload) {
-  const { name, genericName, category, manufacturer, dosageForm, strength, prescriptionRequired, price } = payload;
+  await ensureMedicineStatusColumn();
+  const {
+    name,
+    genericName,
+    category,
+    manufacturer,
+    dosageForm,
+    strength,
+    prescriptionRequired,
+    price,
+    status,
+  } = payload;
   let parsedPrice = null;
   if (price !== undefined) {
     parsedPrice = Number(price);
@@ -77,6 +105,7 @@ async function updateMedicine(id, payload) {
       throw error;
     }
   }
+  const normalizedStatus = status !== undefined ? normalizeMedicineStatus(status) : null;
 
   const result = await pool.query(
     `UPDATE MEDICINE 
@@ -87,16 +116,18 @@ async function updateMedicine(id, payload) {
          dosage_form = COALESCE($5, dosage_form),
          strength = COALESCE($6, strength),
          unit_price = COALESCE($7, unit_price),
-         prescription_required = COALESCE($8, prescription_required)
-     WHERE medicine_id = $9
+         prescription_required = COALESCE($8, prescription_required),
+         status = COALESCE($9, status)
+     WHERE medicine_id = $10
      RETURNING *`,
-    [name, genericName, category, manufacturer, dosageForm, strength, parsedPrice, prescriptionRequired, id]
+    [name, genericName, category, manufacturer, dosageForm, strength, parsedPrice, prescriptionRequired, normalizedStatus, id]
   );
   if (result.rows.length === 0) return null;
   return mapMedicineRow(result.rows[0]);
 }
 
 async function deleteMedicine(id) {
+  await ensureMedicineStatusColumn();
   const result = await pool.query('DELETE FROM MEDICINE WHERE medicine_id = $1 RETURNING *', [id]);
   return result.rows[0] || null;
 }

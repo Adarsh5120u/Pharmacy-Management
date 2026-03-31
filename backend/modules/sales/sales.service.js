@@ -1,4 +1,10 @@
 const pool = require('../../db');
+const { ensureMedicineStatusColumn, getMedicineStatusSql } = require('../medicines/medicineStatus');
+const {
+  ensureSaleReturnColumns,
+  getActiveSaleAmountSql,
+  getSaleReturnStatusSql,
+} = require('./saleReturnColumns');
 
 let customerNameColumnExists = null;
 
@@ -21,6 +27,7 @@ async function hasCustomerNameColumn(client = pool) {
 }
 
 async function getSalesList({ includeAll = false } = {}) {
+  await ensureSaleReturnColumns();
   const limitClause = includeAll ? '' : 'LIMIT 50';
   const supportsCustomerName = await hasCustomerNameColumn();
   const customerNameSelect = supportsCustomerName
@@ -32,10 +39,13 @@ async function getSalesList({ includeAll = false } = {}) {
         s.sale_id as id,
         'INV-' || s.sale_id::text as "invoiceId",
         s.sale_date as "date",
-        s.total_amount as total,
+        ${getActiveSaleAmountSql('s')} as total,
+        COALESCE(s.total_amount, 0) as "originalTotal",
         ${customerNameSelect} as "customerName",
         s.payment_method as "paymentMethod",
-        COUNT(si.item_id) as items
+        COUNT(si.item_id) as items,
+        ${getSaleReturnStatusSql('s')} as "isReturned",
+        s.returned_at as "returnedAt"
       FROM PHARMACY_SALE s
       LEFT JOIN PHARMACY_SALE_ITEM si ON s.sale_id = si.sale_id
       GROUP BY s.sale_id
@@ -47,15 +57,20 @@ async function getSalesList({ includeAll = false } = {}) {
 }
 
 async function getSaleDetailsById(id) {
+  await ensureSaleReturnColumns();
   const supportsCustomerName = await hasCustomerNameColumn();
   const sale = await pool.query(
     supportsCustomerName
       ? `SELECT sale_id, prescription_id, sale_date, total_amount, payment_method,
-             COALESCE(NULLIF(TRIM(customer_name), ''), 'Walk-in Customer') as customer_name
+             COALESCE(NULLIF(TRIM(customer_name), ''), 'Walk-in Customer') as customer_name,
+             ${getSaleReturnStatusSql()} as is_returned,
+             returned_at
            FROM PHARMACY_SALE
            WHERE sale_id = $1`
       : `SELECT sale_id, prescription_id, sale_date, total_amount, payment_method,
-             'Walk-in Customer' as customer_name
+             'Walk-in Customer' as customer_name,
+             ${getSaleReturnStatusSql()} as is_returned,
+             returned_at
            FROM PHARMACY_SALE
            WHERE sale_id = $1`,
     [id]
@@ -87,11 +102,40 @@ async function createSale({
   totalAmount,
   customerName,
 }) {
+  await ensureMedicineStatusColumn();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const supportsCustomerName = await hasCustomerNameColumn(client);
     const normalizedCustomerName = String(customerName || '').trim() || 'Walk-in Customer';
+    const uniqueMedicineIds = [...new Set(items.map((item) => Number(item.medicineId)).filter(Number.isFinite))];
+
+    if (uniqueMedicineIds.length > 0) {
+      const medicineResult = await client.query(
+        `SELECT medicine_id, name, ${getMedicineStatusSql()} as status
+         FROM MEDICINE
+         WHERE medicine_id = ANY($1::int[])`,
+        [uniqueMedicineIds]
+      );
+      const medicineMap = new Map(medicineResult.rows.map((row) => [Number(row.medicine_id), row]));
+      const missingMedicineId = uniqueMedicineIds.find((medicineId) => !medicineMap.has(medicineId));
+
+      if (missingMedicineId !== undefined) {
+        const err = new Error(`Medicine ${missingMedicineId} was not found.`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const inactiveMedicine = uniqueMedicineIds
+        .map((medicineId) => medicineMap.get(medicineId))
+        .find((medicine) => medicine?.status !== 'active');
+
+      if (inactiveMedicine) {
+        const err = new Error(`${inactiveMedicine.name} is inactive and cannot be sold.`);
+        err.statusCode = 400;
+        throw err;
+      }
+    }
 
     const saleResult = supportsCustomerName
       ? await client.query(
@@ -150,8 +194,99 @@ async function createSale({
   }
 }
 
+async function returnSale(id) {
+  const client = await pool.connect();
+  let transactionStarted = false;
+  try {
+    await ensureSaleReturnColumns(client);
+    await client.query('BEGIN');
+    transactionStarted = true;
+
+    const saleResult = await client.query(
+      `SELECT sale_id, total_amount, ${getSaleReturnStatusSql()} as is_returned, returned_at
+       FROM PHARMACY_SALE
+       WHERE sale_id = $1
+       FOR UPDATE`,
+      [id]
+    );
+
+    if (saleResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      transactionStarted = false;
+      return null;
+    }
+
+    const sale = saleResult.rows[0];
+
+    if (sale.is_returned) {
+      await client.query('COMMIT');
+      transactionStarted = false;
+      return {
+        sale_id: sale.sale_id,
+        total_amount: Number(sale.total_amount || 0),
+        is_returned: true,
+        returned_at: sale.returned_at,
+        already_returned: true,
+      };
+    }
+
+    const itemsResult = await client.query(
+      `SELECT item_id, medicine_id, batch_id, quantity
+       FROM PHARMACY_SALE_ITEM
+       WHERE sale_id = $1`,
+      [id]
+    );
+
+    for (const item of itemsResult.rows) {
+      const restoredStock = await client.query(
+        `UPDATE MEDICINE_BATCH
+         SET quantity_available = quantity_available + $1
+         WHERE batch_id = $2
+           AND medicine_id = $3
+         RETURNING batch_id`,
+        [item.quantity, item.batch_id, item.medicine_id]
+      );
+
+      if (restoredStock.rows.length === 0) {
+        const restoreError = new Error(
+          `Unable to restore stock for sale ${id}. Batch ${item.batch_id} was not found for medicine ${item.medicine_id}.`
+        );
+        restoreError.statusCode = 400;
+        throw restoreError;
+      }
+    }
+
+    const updatedSale = await client.query(
+      `UPDATE PHARMACY_SALE
+       SET is_returned = TRUE,
+           returned_at = CURRENT_TIMESTAMP
+       WHERE sale_id = $1
+       RETURNING sale_id, total_amount, ${getSaleReturnStatusSql()} as is_returned, returned_at`,
+      [id]
+    );
+
+    await client.query('COMMIT');
+    transactionStarted = false;
+
+    return {
+      sale_id: updatedSale.rows[0].sale_id,
+      total_amount: Number(updatedSale.rows[0].total_amount || 0),
+      is_returned: updatedSale.rows[0].is_returned,
+      returned_at: updatedSale.rows[0].returned_at,
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      await client.query('ROLLBACK');
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   getSalesList,
   getSaleDetailsById,
   createSale,
+  returnSale,
 };

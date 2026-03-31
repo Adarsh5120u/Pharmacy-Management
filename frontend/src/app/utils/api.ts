@@ -171,6 +171,11 @@ export const salesApi = {
       method: 'POST',
       body: JSON.stringify(sale),
     }),
+
+  returnSale: (id: string) =>
+    apiCall<{ success: boolean; data: any }>(`/sales/${id}/return`, {
+      method: 'PATCH',
+    }),
 };
 
 // ============================================

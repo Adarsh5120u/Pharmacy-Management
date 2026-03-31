@@ -46,6 +46,12 @@ interface InventoryItem {
   salesReferences?: number;
 }
 
+interface MedicineOption {
+  id: string;
+  name: string;
+  status: "active" | "inactive";
+}
+
 function normalizeInventoryItem(item: any): InventoryItem {
   const get = (camel: string, lower: string) =>
     item?.[camel] !== undefined ? item[camel] : item?.[lower];
@@ -79,7 +85,7 @@ export function Inventory() {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
-  const [medicines, setMedicines] = useState<any[]>([]);
+  const [medicines, setMedicines] = useState<MedicineOption[]>([]);
   const [newBatch, setNewBatch] = useState<Partial<InventoryItem>>({
     medicineId: "",
     medicineName: "",
@@ -98,7 +104,15 @@ export function Inventory() {
   const loadMedicines = async () => {
     try {
       const res = await medicinesApi.getAll();
-      setMedicines((res.data || []).map((m) => ({ ...m, id: String(m.id) })));
+      setMedicines(
+        (res.data || [])
+          .map((m: any) => ({
+            id: String(m.id),
+            name: String(m.name || ""),
+            status: m.status === "inactive" ? "inactive" : "active",
+          }))
+          .filter((medicine) => medicine.status === "active")
+      );
     } catch (e) {
       console.error("Error loading medicines", e);
     }
@@ -372,6 +386,7 @@ export function Inventory() {
                 loadInventory();
               } catch (err) {
                 console.error("Error adding batch", err);
+                alert(err instanceof Error ? err.message : "Failed to add stock batch.");
               }
             }}>
               Save

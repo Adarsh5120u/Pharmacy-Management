@@ -1,6 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from "react";
-import { formatDate } from "../utils/date";
-import { Plus, Search, Eye, Trash2, Loader2 } from "lucide-react";
+import { formatDate, formatDateTime } from "../utils/date";
+import { Plus, Search, Eye, Trash2, Loader2, Download } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "./ui/select";
 import { medicinesApi, purchaseOrdersApi, suppliersApi } from "../utils/api";
+import { createPurchaseOrderReportPdfBlob } from "../utils/purchaseOrderReportPdf";
 
 interface PurchaseOrder {
   id: string;
@@ -65,6 +66,7 @@ interface PurchaseOrderDetails {
   orderDate: string;
   supplierName: string;
   status: string;
+  receivedAt?: string;
   items: Array<{
     id: string;
     medicineId: string;
@@ -72,6 +74,10 @@ interface PurchaseOrderDetails {
     quantity: number;
     unitPrice: number;
     lineTotal: number;
+    receivedQuantity?: number;
+    expiryDate?: string;
+    batchNumber?: string;
+    receivedAt?: string;
   }>;
 }
 
@@ -82,6 +88,16 @@ interface ReceiveItemInput {
   orderedQuantity: number;
   receivedQuantity: number;
   expiryDate: string;
+}
+
+interface GeneratedReportPayload {
+  title: string;
+  fileName: string;
+  blob: Blob;
+}
+
+interface PurchaseOrdersProps {
+  onPurchaseOrderReportGenerated?: (payload: GeneratedReportPayload) => void;
 }
 
 const ORDER_STATUSES: PurchaseOrder["status"][] = ["pending", "approved", "received", "cancelled"];
@@ -103,7 +119,84 @@ const isLockedAfterReceivedTransition = (
   nextStatus: PurchaseOrder["status"]
 ) => currentStatus === "received" && nextStatus !== "received";
 
-export function PurchaseOrders() {
+function downloadReport(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function mapPurchaseOrderDetails(data: any): PurchaseOrderDetails {
+  return {
+    id: String(data.id ?? ""),
+    poNumber: String(data.poNumber ?? data.ponumber ?? `PO${data.id ?? ""}`),
+    orderDate: String(data.orderDate ?? data.orderdate ?? ""),
+    supplierName: String(data.supplierName ?? data.suppliername ?? "Unknown Supplier"),
+    status: String(data.status ?? "pending"),
+    receivedAt: String(data.receivedAt ?? data.receivedat ?? ""),
+    items: (data.items || []).map((item: any) => ({
+      id: String(item.id ?? ""),
+      medicineId: String(item.medicineId ?? item.medicineid ?? ""),
+      medicineName: String(item.medicineName ?? item.medicinename ?? ""),
+      quantity: Number(item.quantity || 0),
+      unitPrice: Number(item.unitPrice ?? item.unitprice ?? 0),
+      lineTotal: Number(item.lineTotal ?? item.linetotal ?? 0),
+      receivedQuantity:
+        item.receivedQuantity !== undefined || item.receivedquantity !== undefined
+          ? Number(item.receivedQuantity ?? item.receivedquantity ?? 0)
+          : undefined,
+      expiryDate:
+        item.expiryDate !== undefined || item.expirydate !== undefined
+          ? String(item.expiryDate ?? item.expirydate ?? "")
+          : undefined,
+      batchNumber:
+        item.batchNumber !== undefined || item.batchnumber !== undefined
+          ? String(item.batchNumber ?? item.batchnumber ?? "")
+          : undefined,
+      receivedAt:
+        item.receivedAt !== undefined || item.receivedat !== undefined
+          ? String(item.receivedAt ?? item.receivedat ?? "")
+          : undefined,
+    })),
+  };
+}
+
+function createPurchaseOrderReportFileName(poNumber: string, timestamp = new Date()) {
+  const fileSafePoNumber =
+    poNumber
+      .replace(/[^a-z0-9-_]+/gi, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .toLowerCase() || "purchase-order";
+
+  const dateStamp = `${timestamp.getFullYear()}-${String(timestamp.getMonth() + 1).padStart(2, "0")}-${String(
+    timestamp.getDate()
+  ).padStart(2, "0")}_${String(timestamp.getHours()).padStart(2, "0")}${String(timestamp.getMinutes()).padStart(
+    2,
+    "0"
+  )}`;
+
+  return `${fileSafePoNumber}-received-report-${dateStamp}.pdf`;
+}
+
+function canGenerateReceivedReport(details: PurchaseOrderDetails) {
+  return (
+    String(details.status).toLowerCase() === "received" &&
+    details.items.length > 0 &&
+    details.items.every(
+      (item) =>
+        item.receivedQuantity !== undefined &&
+        Number(item.receivedQuantity) > 0 &&
+        Boolean(String(item.expiryDate || "").trim())
+    )
+  );
+}
+
+export function PurchaseOrders({ onPurchaseOrderReportGenerated }: PurchaseOrdersProps) {
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
   const [medicines, setMedicines] = useState<MedicineOption[]>([]);
@@ -123,6 +216,7 @@ export function PurchaseOrders() {
   const [isReceiveDialogOpen, setIsReceiveDialogOpen] = useState(false);
   const [receiveDialogLoading, setReceiveDialogLoading] = useState(false);
   const [receiveSubmitting, setReceiveSubmitting] = useState(false);
+  const [reportLoadingId, setReportLoadingId] = useState<string | null>(null);
   const [receiveTargetOrder, setReceiveTargetOrder] = useState<PurchaseOrder | null>(null);
   const [receiveItems, setReceiveItems] = useState<ReceiveItemInput[]>([]);
 
@@ -174,9 +268,11 @@ export function PurchaseOrders() {
           price: Number(medicine.price || 0),
         }))
       );
+      return true;
     } catch (error) {
       console.error("Error loading purchase order data:", error);
       alert("Failed to load purchase order data from backend.");
+      return false;
     } finally {
       setLoading(false);
     }
@@ -277,6 +373,79 @@ export function PurchaseOrders() {
     setReceiveSubmitting(false);
     setReceiveTargetOrder(null);
     setReceiveItems([]);
+  };
+
+  const createAndDownloadPurchaseOrderReport = async (details: PurchaseOrderDetails) => {
+    if (!canGenerateReceivedReport(details)) {
+      throw new Error("Receipt details are not available yet for this purchase order.");
+    }
+
+    const generatedAt = new Date();
+    const fileName = createPurchaseOrderReportFileName(details.poNumber, generatedAt);
+    const receivedAt =
+      details.receivedAt ||
+      details.items.find((item) => String(item.receivedAt || "").trim())?.receivedAt ||
+      generatedAt.toISOString();
+
+    const blob = createPurchaseOrderReportPdfBlob({
+      poNumber: details.poNumber,
+      supplierName: details.supplierName,
+      orderDate: details.orderDate,
+      receivedAt,
+      generatedAt: generatedAt.toISOString(),
+      status: "received",
+      entries: details.items.map((item) => {
+        const receivedQuantity = Number(item.receivedQuantity ?? item.quantity ?? 0);
+        const unitPrice = Number(item.unitPrice || 0);
+
+        return {
+          medicineName: item.medicineName,
+          orderedQuantity: Number(item.quantity || 0),
+          receivedQuantity,
+          unitPrice,
+          expiryDate: String(item.expiryDate || ""),
+          lineTotal: receivedQuantity * unitPrice,
+        };
+      }),
+    });
+
+    downloadReport(blob, fileName);
+    onPurchaseOrderReportGenerated?.({
+      title: `${details.poNumber} receipt report ready`,
+      fileName,
+      blob,
+    });
+  };
+
+  const handleDownloadPurchaseOrderReport = async (
+    orderId: string,
+    initialDetails?: PurchaseOrderDetails | null,
+    options: { suppressErrorAlert?: boolean } = {}
+  ) => {
+    setReportLoadingId(orderId);
+
+    try {
+      const details =
+        initialDetails && initialDetails.id === orderId
+          ? initialDetails
+          : mapPurchaseOrderDetails((await purchaseOrdersApi.getById(orderId)).data || {});
+
+      if (String(details.status).toLowerCase() !== "received") {
+        alert("Only received purchase orders can generate a receipt report.");
+        return;
+      }
+
+      await createAndDownloadPurchaseOrderReport(details);
+      return true;
+    } catch (error) {
+      console.error("Error downloading purchase order report:", error);
+      if (!options.suppressErrorAlert) {
+        alert(error instanceof Error ? error.message : "Failed to download purchase order report.");
+      }
+      return false;
+    } finally {
+      setReportLoadingId(null);
+    }
   };
 
   const openReceiveDialog = async (order: PurchaseOrder) => {
@@ -437,11 +606,32 @@ export function PurchaseOrders() {
           itemId: Number(item.itemId),
           medicineId: Number(item.medicineId),
           quantityReceived: Number(item.receivedQuantity),
-          expiryDate: item.expiryDate,
+          expiryDate: String(item.expiryDate),
         })),
       });
-      await loadData();
+
+      const reportGenerated = await handleDownloadPurchaseOrderReport(receiveTargetOrder.id, null, {
+        suppressErrorAlert: true,
+      });
+
+      const refreshSucceeded = await loadData();
+
       resetReceiveDialog();
+
+      if (!refreshSucceeded) {
+        alert(
+          reportGenerated
+            ? "Purchase order marked as received and report generated, but the list could not be refreshed. Please reload the page."
+            : "Purchase order marked as received, but the report or list refresh did not complete. Please reload the page."
+        );
+        return;
+      }
+
+      alert(
+        reportGenerated
+          ? "Purchase order marked as received. The report was downloaded and added to notifications."
+          : "Purchase order marked as received, but the report could not be generated."
+      );
     } catch (error) {
       console.error("Error receiving purchase order:", error);
       setOrders(previousOrders);
@@ -456,22 +646,7 @@ export function PurchaseOrders() {
       setDetailsLoading(true);
       setIsDetailsOpen(true);
       const response = await purchaseOrdersApi.getById(orderId);
-      const data = response.data || {};
-      setSelectedOrderDetails({
-        id: String(data.id ?? ""),
-        poNumber: String(data.poNumber ?? data.ponumber ?? `PO${data.id ?? ""}`),
-        orderDate: String(data.orderDate ?? data.orderdate ?? ""),
-        supplierName: String(data.supplierName ?? data.suppliername ?? "Unknown Supplier"),
-        status: String(data.status ?? "pending"),
-        items: (data.items || []).map((item: any) => ({
-          id: String(item.id ?? ""),
-          medicineId: String(item.medicineId ?? item.medicineid ?? ""),
-          medicineName: String(item.medicineName ?? item.medicinename ?? ""),
-          quantity: Number(item.quantity || 0),
-          unitPrice: Number(item.unitPrice ?? item.unitprice ?? 0),
-          lineTotal: Number(item.lineTotal ?? item.linetotal ?? 0),
-        })),
-      });
+      setSelectedOrderDetails(mapPurchaseOrderDetails(response.data || {}));
     } catch (error) {
       console.error("Error loading purchase order details:", error);
       setSelectedOrderDetails(null);
@@ -568,9 +743,26 @@ export function PurchaseOrders() {
                       </Select>
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="icon" onClick={() => handleViewDetails(order.id)}>
-                        <Eye className="w-4 h-4" />
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <Button variant="ghost" size="icon" onClick={() => handleViewDetails(order.id)}>
+                          <Eye className="w-4 h-4" />
+                        </Button>
+                        {currentStatus === "received" ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => void handleDownloadPurchaseOrderReport(order.id)}
+                            disabled={reportLoadingId === order.id}
+                            title="Download receipt report"
+                          >
+                            {reportLoadingId === order.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Download className="w-4 h-4" />
+                            )}
+                          </Button>
+                        ) : null}
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
@@ -913,6 +1105,12 @@ export function PurchaseOrders() {
                   <p className="text-gray-500">Status</p>
                   <Badge variant={getStatusBadge(selectedOrderDetails.status)}>{selectedOrderDetails.status}</Badge>
                 </div>
+                {String(selectedOrderDetails.status).toLowerCase() === "received" && selectedOrderDetails.receivedAt ? (
+                  <div>
+                    <p className="text-gray-500">Received At</p>
+                    <p>{formatDateTime(selectedOrderDetails.receivedAt)}</p>
+                  </div>
+                ) : null}
               </div>
 
               <div className="border rounded-lg overflow-hidden">
@@ -921,7 +1119,13 @@ export function PurchaseOrders() {
                     <TableRow>
                       <TableHead>Medicine</TableHead>
                       <TableHead>Qty</TableHead>
+                      {String(selectedOrderDetails.status).toLowerCase() === "received" ? (
+                        <TableHead>Received Qty</TableHead>
+                      ) : null}
                       <TableHead>Unit Price</TableHead>
+                      {String(selectedOrderDetails.status).toLowerCase() === "received" ? (
+                        <TableHead>Expiry Date</TableHead>
+                      ) : null}
                       <TableHead>Total</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -930,7 +1134,13 @@ export function PurchaseOrders() {
                       <TableRow key={item.id}>
                         <TableCell>{item.medicineName}</TableCell>
                         <TableCell>{item.quantity}</TableCell>
+                        {String(selectedOrderDetails.status).toLowerCase() === "received" ? (
+                          <TableCell>{item.receivedQuantity ?? "-"}</TableCell>
+                        ) : null}
                         <TableCell>{"\u20B9"} {Number(item.unitPrice || 0).toFixed(2)}</TableCell>
+                        {String(selectedOrderDetails.status).toLowerCase() === "received" ? (
+                          <TableCell>{item.expiryDate ? formatDate(item.expiryDate) : "-"}</TableCell>
+                        ) : null}
                         <TableCell>{"\u20B9"} {Number(item.lineTotal || 0).toFixed(2)}</TableCell>
                       </TableRow>
                     ))}
@@ -944,6 +1154,25 @@ export function PurchaseOrders() {
                   {"\u20B9"} {selectedOrderDetails.items.reduce((sum, item) => sum + Number(item.lineTotal || 0), 0).toFixed(2)}
                 </p>
               </div>
+
+              {String(selectedOrderDetails.status).toLowerCase() === "received" ? (
+                <div className="flex justify-end">
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void handleDownloadPurchaseOrderReport(selectedOrderDetails.id, selectedOrderDetails)
+                    }
+                    disabled={reportLoadingId === selectedOrderDetails.id}
+                  >
+                    {reportLoadingId === selectedOrderDetails.id ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <Download className="w-4 h-4 mr-2" />
+                    )}
+                    Download Receipt Report
+                  </Button>
+                </div>
+              ) : null}
             </div>
           )}
         </DialogContent>

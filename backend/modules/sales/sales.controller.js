@@ -49,8 +49,24 @@ async function createSale(req, res) {
   }
 }
 
+async function returnSale(req, res) {
+  try {
+    const data = await salesService.returnSale(req.params.id);
+    if (!data) {
+      return res.status(404).json({ success: false, error: 'Sale not found' });
+    }
+    return res.json({ success: true, data });
+  } catch (err) {
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({ success: false, error: err.message });
+    }
+    return sendServerError(res, err, 'Error returning sale:');
+  }
+}
+
 module.exports = {
   listSales,
   getSaleById,
   createSale,
+  returnSale,
 };

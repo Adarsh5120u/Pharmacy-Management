@@ -20,6 +20,9 @@ async function addBatch(req, res) {
     if (!data) return res.status(404).json({ success: false, error: 'Medicine not found' });
     return res.status(201).json({ success: true, data });
   } catch (err) {
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({ success: false, error: err.message });
+    }
     return sendServerError(res, err, 'Error adding batch:');
   }
 }
