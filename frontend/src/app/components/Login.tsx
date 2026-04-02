@@ -14,32 +14,50 @@ interface LoginProps {
   onAuthenticated: (user: UserProfile) => void;
 }
 
-const DEMO_USER = {
-  email: "admin@pharmacy.com",
-  password: "admin123",
-  name: "Johnson",
-  role: "Pharmacist",
-};
+const DEMO_USERS = [
+  {
+    email: "pharmacist@pharmacy.com",
+    password: "admin123",
+    name: "Johnson",
+    role: "Pharmacist",
+  },
+  {
+    email: "admin@pharmacy.com",
+    password: "admin123",
+    name: "System Admin",
+    role: "Admin",
+  },
+] as const;
 
 const DEMO_CODE = "123456";
 
 export function Login({ onAuthenticated }: LoginProps) {
   const [step, setStep] = useState<"credentials" | "verify">("credentials");
-  const [email, setEmail] = useState(DEMO_USER.email);
-  const [password, setPassword] = useState(DEMO_USER.password);
+  const [email, setEmail] = useState(DEMO_USERS[0].email);
+  const [password, setPassword] = useState(DEMO_USERS[0].password);
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
+  const [pendingUser, setPendingUser] = useState<UserProfile | null>(null);
 
   const handleCredentials = (event: React.FormEvent) => {
     event.preventDefault();
     setError("");
 
     const normalizedEmail = email.trim().toLowerCase();
-    if (normalizedEmail !== DEMO_USER.email || password !== DEMO_USER.password) {
+    const matchedUser = DEMO_USERS.find(
+      (user) => user.email === normalizedEmail && user.password === password
+    );
+
+    if (!matchedUser) {
       setError("Invalid email or password.");
       return;
     }
 
+    setPendingUser({
+      name: matchedUser.name,
+      email: matchedUser.email,
+      role: matchedUser.role,
+    });
     setStep("verify");
   };
 
@@ -52,11 +70,13 @@ export function Login({ onAuthenticated }: LoginProps) {
       return;
     }
 
-    onAuthenticated({
-      name: DEMO_USER.name,
-      email: DEMO_USER.email,
-      role: DEMO_USER.role,
-    });
+    if (!pendingUser) {
+      setError("Session expired. Please sign in again.");
+      setStep("credentials");
+      return;
+    }
+
+    onAuthenticated(pendingUser);
   };
 
   return (
@@ -103,9 +123,10 @@ export function Login({ onAuthenticated }: LoginProps) {
               <Button type="submit" className="w-full">
                 Sign In
               </Button>
-              <p className="text-xs text-gray-500">
-                Demo credentials: {DEMO_USER.email} / {DEMO_USER.password}
-              </p>
+              <div className="text-xs text-gray-500 space-y-1">
+                <p>Demo pharmacist: {DEMO_USERS[0].email} / {DEMO_USERS[0].password}</p>
+                <p>Demo admin: {DEMO_USERS[1].email} / {DEMO_USERS[1].password}</p>
+              </div>
             </form>
           ) : (
             <form className="space-y-4" onSubmit={handleVerify}>
@@ -138,6 +159,7 @@ export function Login({ onAuthenticated }: LoginProps) {
                   setStep("credentials");
                   setCode("");
                   setError("");
+                  setPendingUser(null);
                 }}
               >
                 Back to login

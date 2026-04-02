@@ -86,6 +86,15 @@ function App() {
     initializeSystem();
   }, []);
 
+  const normalizedRole = String(user?.role || "").trim().toLowerCase();
+  const isDashboardOnlyUser = normalizedRole === "admin";
+
+  useEffect(() => {
+    if (isDashboardOnlyUser && activeScreen !== "dashboard") {
+      setActiveScreen("dashboard");
+    }
+  }, [activeScreen, isDashboardOnlyUser]);
+
   const handleReportGenerated = (payload: GeneratedReportPayload) => {
     const url = URL.createObjectURL(payload.blob);
     const notification: ReportNotification = {
@@ -109,6 +118,10 @@ function App() {
   };
 
   const renderScreen = () => {
+    if (isDashboardOnlyUser && activeScreen !== "dashboard") {
+      return <Dashboard />;
+    }
+
     switch (activeScreen) {
       case "dashboard":
         return <Dashboard />;
@@ -148,14 +161,14 @@ function App() {
 
   return (
     <div className="flex h-screen bg-gray-50">
-      <Sidebar activeScreen={activeScreen} onNavigate={setActiveScreen} />
+      <Sidebar activeScreen={activeScreen} onNavigate={setActiveScreen} role={user.role} />
       <div className="flex-1 flex flex-col overflow-hidden">
         <TopBar
           tenantName="HealthCare Pharmacy - Main Branch"
           userName={user.name}
-          onProfile={() => setActiveScreen("profile")}
+          onProfile={!isDashboardOnlyUser ? () => setActiveScreen("profile") : undefined}
+          showProfile={!isDashboardOnlyUser}
           onLogout={() => {
-            clearNotifications();
             setUser(null);
             setActiveScreen("dashboard");
           }}

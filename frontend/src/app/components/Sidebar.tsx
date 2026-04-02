@@ -4,6 +4,7 @@ import { cn } from "./ui/utils";
 interface SidebarProps {
   activeScreen: string;
   onNavigate: (screen: string) => void;
+  role?: string;
 }
 
 const menuItems = [
@@ -15,7 +16,13 @@ const menuItems = [
   { id: "sales", label: "Sales", icon: DollarSign },
 ];
 
-export function Sidebar({ activeScreen, onNavigate }: SidebarProps) {
+export function Sidebar({ activeScreen, onNavigate, role }: SidebarProps) {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const visibleMenuItems =
+    normalizedRole === "admin"
+      ? menuItems.filter((item) => item.id === "dashboard")
+      : menuItems;
+
   return (
     <aside className="w-64 bg-white border-r border-gray-200 h-screen flex flex-col">
       <div className="p-6 border-b border-gray-200">
@@ -32,7 +39,7 @@ export function Sidebar({ activeScreen, onNavigate }: SidebarProps) {
 
       <nav className="flex-1 p-4">
         <ul className="space-y-1">
-          {menuItems.map((item) => {
+          {visibleMenuItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeScreen === item.id;
             

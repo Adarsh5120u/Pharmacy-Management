@@ -12,8 +12,9 @@ import {
 interface TopBarProps {
   tenantName: string;
   userName: string;
-  onProfile: () => void;
+  onProfile?: () => void;
   onLogout: () => void;
+  showProfile?: boolean;
   notifications: Array<{
     id: string;
     title: string;
@@ -29,6 +30,7 @@ export function TopBar({
   userName,
   onProfile,
   onLogout,
+  showProfile = true,
   notifications,
   onClearNotifications,
 }: TopBarProps) {
@@ -94,9 +96,13 @@ export function TopBar({
           <DropdownMenuContent align="end" className="w-48">
             <DropdownMenuLabel>My Account</DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={onProfile}>Profile</DropdownMenuItem>
-            <DropdownMenuItem>Settings</DropdownMenuItem>
-            <DropdownMenuSeparator />
+            {showProfile && onProfile ? (
+              <>
+                <DropdownMenuItem onClick={onProfile}>Profile</DropdownMenuItem>
+                <DropdownMenuItem>Settings</DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
             <DropdownMenuItem className="text-red-600" onClick={onLogout}>
               <LogOut className="w-4 h-4 mr-2" />
               Logout
